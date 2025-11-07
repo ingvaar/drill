@@ -1,8 +1,9 @@
 use std::convert::TryInto;
+use std::io;
 
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use yaml_rust::Yaml;
+use yaml_rust2::Yaml;
 
 use crate::interpolator::INTERPOLATION_REGEX;
 
@@ -13,36 +14,56 @@ pub fn is_that_you(item: &Yaml) -> bool {
     item["request"].as_hash().is_some() && item["with_items_range"].as_hash().is_some()
 }
 
-pub fn expand(item: &Yaml, benchmark: &mut Benchmark) {
+pub fn expand(item: &Yaml, benchmark: &mut Benchmark) -> Result<(), io::Error> {
     if let Some(with_iter_items) = item["with_items_range"].as_hash() {
         let init = Yaml::Integer(1);
         let lstart = Yaml::String("start".into());
         let lstep = Yaml::String("step".into());
         let lstop = Yaml::String("stop".into());
 
-        let vstart: &Yaml = with_iter_items.get(&lstart).expect("Start property is mandatory");
+        let vstart: &Yaml = match with_iter_items.get(&lstart) {
+            Some(value) => value,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start property must be an integer")),
+        };
         let vstep: &Yaml = with_iter_items.get(&lstep).unwrap_or(&init);
-        let vstop: &Yaml = with_iter_items.get(&lstop).expect("Stop property is mandatory");
+        let vstop: &Yaml = match with_iter_items.get(&lstop) {
+            Some(value) => value,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Stop property must be an integer")),
+        };
 
         let start: &str = vstart.as_str().unwrap_or("");
         let step: &str = vstep.as_str().unwrap_or("");
         let stop: &str = vstop.as_str().unwrap_or("");
 
-        if INTERPOLATION_REGEX.is_match(start) {
-            panic!("Interpolations not supported in 'start' property!");
+        let regex = match INTERPOLATION_REGEX.as_ref() {
+            Ok(regex) => regex,
+            Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid regex: {}", err))),
+        };
+
+        if regex.is_match(start) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Interpolations not supported in 'start' property!"));
         }
 
-        if INTERPOLATION_REGEX.is_match(step) {
-            panic!("Interpolations not supported in 'step' property!");
+        if regex.is_match(step) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Interpolations not supported in 'step' property!"));
         }
 
-        if INTERPOLATION_REGEX.is_match(stop) {
-            panic!("Interpolations not supported in 'stop' property!");
+        if regex.is_match(stop) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Interpolations not supported in 'stop' property!"));
         }
 
-        let start: i64 = vstart.as_i64().expect("Start needs to be a number");
-        let step: i64 = vstep.as_i64().expect("Step needs to be a number");
-        let stop: i64 = vstop.as_i64().expect("Stop needs to be a number");
+        let start: i64 = match vstart.as_i64() {
+            Some(start) => start,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start needs to be a number")),
+        };
+        let step: i64 = match vstep.as_i64() {
+            Some(step) => step,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Step needs to be a number")),
+        };
+        let stop: i64 = match vstop.as_i64() {
+            Some(stop) => stop,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Stop needs to be a number")),
+        };
 
         let stop = stop + 1; // making stop inclusive
 
@@ -57,16 +78,21 @@ pub fn expand(item: &Yaml, benchmark: &mut Benchmark) {
             }
 
             if let Some(pick) = item["pick"].as_i64() {
-                with_items.truncate(pick.try_into().expect("pick can't be larger than size of range"))
+                match pick.try_into() {
+                    Ok(pick) => with_items.truncate(pick),
+                    Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Pick needs to be a number")),
+                }
             }
 
             for (index, value) in with_items.iter().enumerate() {
                 let index = index as u32;
 
-                benchmark.push(Box::new(Request::new(item, Some(Yaml::Integer(*value)), Some(index))));
+                benchmark.push(Box::new(Request::new(item, Some(Yaml::Integer(*value)), Some(index))?));
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -76,11 +102,12 @@ mod tests {
     #[test]
     fn expand_multi_range() {
         let text = "---\nname: foobar\nrequest:\n  url: /api/{{ item }}\nwith_items_range:\n  start: 2\n  step: 2\n  stop: 20";
-        let docs = yaml_rust::YamlLoader::load_from_str(text).unwrap();
+        let docs = yaml_rust2::YamlLoader::load_from_str(text).unwrap();
         let doc = &docs[0];
         let mut benchmark: Benchmark = Benchmark::new();
 
-        expand(doc, &mut benchmark);
+        let result = expand(doc, &mut benchmark);
+        assert!(result.is_ok());
 
         assert!(is_that_you(doc));
         assert_eq!(benchmark.len(), 10);
@@ -89,35 +116,36 @@ mod tests {
     #[test]
     fn expand_multi_range_should_limit_requests_using_the_pick_option() {
         let text = "---\nname: foobar\nrequest:\n  url: /api/{{ item }}\npick: 3\nwith_items_range:\n  start: 2\n  step: 2\n  stop: 20";
-        let docs = yaml_rust::YamlLoader::load_from_str(text).unwrap();
+        let docs = yaml_rust2::YamlLoader::load_from_str(text).unwrap();
         let doc = &docs[0];
         let mut benchmark: Benchmark = Benchmark::new();
 
-        expand(doc, &mut benchmark);
+        let result = expand(doc, &mut benchmark);
+        assert!(result.is_ok());
 
         assert!(is_that_you(doc));
         assert_eq!(benchmark.len(), 3);
     }
 
     #[test]
-    #[should_panic]
     fn invalid_expand() {
         let text = "---\nname: foobar\nrequest:\n  url: /api/{{ item }}\nwith_items_range:\n  start: 1\n  step: 2\n  stop: foo";
-        let docs = yaml_rust::YamlLoader::load_from_str(text).unwrap();
+        let docs = yaml_rust2::YamlLoader::load_from_str(text).unwrap();
         let doc = &docs[0];
         let mut benchmark: Benchmark = Benchmark::new();
 
-        expand(doc, &mut benchmark);
+        let result = expand(doc, &mut benchmark);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic]
     fn runtime_expand() {
         let text = "---\nname: foobar\nrequest:\n  url: /api/{{ item }}\nwith_items_range:\n  start: 1\n  step: 2\n  stop: \"{{ memory }}\"";
-        let docs = yaml_rust::YamlLoader::load_from_str(text).unwrap();
+        let docs = yaml_rust2::YamlLoader::load_from_str(text).unwrap();
         let doc = &docs[0];
         let mut benchmark: Benchmark = Benchmark::new();
 
-        expand(doc, &mut benchmark);
+        let result = expand(doc, &mut benchmark);
+        assert!(result.is_err());
     }
 }

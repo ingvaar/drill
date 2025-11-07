@@ -1,7 +1,7 @@
 use crate::reader;
 use colored::*;
-use std::collections::HashSet;
-use yaml_rust::{Yaml, YamlEmitter};
+use std::{collections::HashSet, io};
+use yaml_rust2::{Yaml, YamlEmitter};
 
 #[derive(Debug)]
 pub struct Tags<'a> {
@@ -10,20 +10,20 @@ pub struct Tags<'a> {
 }
 
 impl<'a> Tags<'a> {
-    pub fn new(tags_option: Option<&'a str>, skip_tags_option: Option<&'a str>) -> Self {
+    pub fn new(tags_option: Option<&'a str>, skip_tags_option: Option<&'a str>) -> Result<Self, io::Error> {
         let tags: Option<HashSet<&str>> = tags_option.map(|m| m.split(',').map(|s| s.trim()).collect());
         let skip_tags: Option<HashSet<&str>> = skip_tags_option.map(|m| m.split(',').map(|s| s.trim()).collect());
 
         if let (Some(t), Some(s)) = (&tags, &skip_tags) {
             if !t.is_disjoint(s) {
-                panic!("`tags` and `skip-tags` must not contain the same values!");
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "`tags` and `skip-tags` must not contain the same values!"));
             }
         }
 
-        Tags {
+        Ok(Tags {
             tags,
             skip_tags,
-        }
+        })
     }
 
     pub fn should_skip_item(&self, item: &Yaml) -> bool {
@@ -56,9 +56,9 @@ impl<'a> Tags<'a> {
     }
 }
 
-pub fn list_benchmark_file_tasks(benchmark_file: &str, tags: &Tags) {
-    let docs = reader::read_file_as_yml(benchmark_file);
-    let items = reader::read_yaml_doc_accessor(&docs[0], Some("plan"));
+pub fn list_benchmark_file_tasks(benchmark_file: &str, tags: &Tags) -> Result<(), io::Error> {
+    let docs = reader::read_file_as_yml(benchmark_file)?;
+    let items = reader::read_yaml_doc_accessor(&docs[0], Some("plan"))?;
 
     println!();
 
@@ -76,21 +76,22 @@ pub fn list_benchmark_file_tasks(benchmark_file: &str, tags: &Tags) {
     let items: Vec<_> = items.iter().filter(|item| !tags.should_skip_item(item)).collect();
 
     if items.is_empty() {
-        println!("{}", "No items".red());
-        std::process::exit(1)
+        return Err(io::Error::new(io::ErrorKind::Other, "No items"));
     }
 
     for item in items {
         let mut out_str = String::new();
         let mut emitter = YamlEmitter::new(&mut out_str);
-        emitter.dump(item).unwrap();
+        let _ = emitter.dump(item);
         println!("{out_str}");
     }
+
+    Ok(())
 }
 
-pub fn list_benchmark_file_tags(benchmark_file: &str) {
-    let docs = reader::read_file_as_yml(benchmark_file);
-    let items = reader::read_yaml_doc_accessor(&docs[0], Some("plan"));
+pub fn list_benchmark_file_tags(benchmark_file: &str) -> Result<(), io::Error> {
+    let docs = reader::read_file_as_yml(benchmark_file)?;
+    let items = reader::read_yaml_doc_accessor(&docs[0], Some("plan"))?;
 
     println!();
 
@@ -108,6 +109,8 @@ pub fn list_benchmark_file_tags(benchmark_file: &str) {
     let mut tags: Vec<_> = tags.into_iter().collect();
     tags.sort_unstable();
     println!("{:width$} {:?}", "Tags".green(), &tags, width = 15);
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -115,7 +118,7 @@ mod tests {
     use super::*;
 
     fn str_to_yaml(text: &str) -> Yaml {
-        let mut docs = yaml_rust::YamlLoader::load_from_str(text).unwrap();
+        let mut docs = yaml_rust2::YamlLoader::load_from_str(text).unwrap();
         docs.remove(0)
     }
 
@@ -124,104 +127,104 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn same_tags_and_skip_tags() {
-        let _ = Tags::new(Some("tag1"), Some("tag1"));
+        let result = Tags::new(Some("tag1"), Some("tag1"));
+        assert!(result.is_err());
     }
 
     #[test]
     fn empty_tags_both() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /");
         let tags = Tags::new(None, None);
-        assert!(!tags.should_skip_item(&item));
+        assert!(!tags.unwrap().should_skip_item(&item));
     }
 
     #[test]
     fn empty_tags() {
         let tags = Tags::new(None, None);
-        assert!(!tags.should_skip_item(&prepare_default_item()));
+        assert!(!tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn tags_contains() {
         let tags = Tags::new(Some("tag1"), None);
-        assert!(!tags.should_skip_item(&prepare_default_item()));
+        assert!(!tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn tags_contains_second() {
         let tags = Tags::new(Some("tag2"), None);
-        assert!(!tags.should_skip_item(&prepare_default_item()));
+        assert!(!tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn tags_contains_both() {
         let tags = Tags::new(Some("tag1,tag2"), None);
-        assert!(!tags.should_skip_item(&prepare_default_item()));
+        assert!(!tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn tags_not_contains() {
         let tags = Tags::new(Some("tag99"), None);
-        assert!(tags.should_skip_item(&prepare_default_item()));
+        assert!(tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn skip_tags_not_contains() {
         let tags = Tags::new(None, Some("tag99"));
-        assert!(!tags.should_skip_item(&prepare_default_item()));
+        assert!(!tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn skip_tags_contains() {
         let tags = Tags::new(None, Some("tag1"));
-        assert!(tags.should_skip_item(&prepare_default_item()));
+        assert!(tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn skip_tags_contains_second() {
         let tags = Tags::new(None, Some("tag2"));
-        assert!(tags.should_skip_item(&prepare_default_item()));
+        assert!(tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn tags_contains_but_also_skip_tags_contains() {
         let tags = Tags::new(Some("tag1"), Some("tag2"));
-        assert!(tags.should_skip_item(&prepare_default_item()));
+        assert!(tags.unwrap().should_skip_item(&prepare_default_item()));
     }
 
     #[test]
     fn never_skipped_by_default() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /\ntags:\n  - never\n  - tag2");
         let tags = Tags::new(None, None);
-        assert!(tags.should_skip_item(&item));
+        assert!(tags.unwrap().should_skip_item(&item));
     }
 
     #[test]
     fn never_tag_skipped_even_when_other_tag_included() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /\ntags:\n  - never\n  - tag2");
         let tags = Tags::new(Some("tag2"), None);
-        assert!(tags.should_skip_item(&item));
+        assert!(tags.unwrap().should_skip_item(&item));
     }
 
     #[test]
     fn include_never_tag() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /\ntags:\n  - never\n  - tag2");
         let tags = Tags::new(Some("never"), None);
-        assert!(!tags.should_skip_item(&item));
+        assert!(!tags.unwrap().should_skip_item(&item));
     }
 
     #[test]
     fn always_tag_included_by_default() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /\ntags:\n  - always\n  - tag2");
         let tags = Tags::new(Some("tag99"), None);
-        assert!(!tags.should_skip_item(&item));
+        assert!(!tags.unwrap().should_skip_item(&item));
     }
 
     #[test]
     fn skip_always_tag() {
         let item = str_to_yaml("---\nname: foo\nrequest:\n  url: /\ntags:\n  - always\n  - tag2");
         let tags = Tags::new(None, Some("always"));
-        assert!(tags.should_skip_item(&item));
+        assert!(tags.unwrap().should_skip_item(&item));
     }
 }
